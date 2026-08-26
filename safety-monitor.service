@@ -1,0 +1,30 @@
+# Service systemd untuk Safety Monitor (deteksi berkala dari CCTV).
+#
+# Pasang:
+#   sudo cp safety-monitor.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now safety-monitor
+#
+# Lihat log:  journalctl -u safety-monitor -f
+#
+# Sesuaikan User dan WorkingDirectory dengan setup di mesin kamu.
+
+[Unit]
+Description=Safety Monitor - deteksi APD dan zona terlarang dari CCTV
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=safety
+WorkingDirectory=/opt/safety-monitor
+Environment="CAM1_URL=rtsp://admin:GANTI_PASSWORD@192.168.1.64:554/Streaming/Channels/102"
+Environment="CAM2_URL=rtsp://admin:GANTI_PASSWORD@192.168.1.65:554/Streaming/Channels/102"
+ExecStart=/opt/safety-monitor/venv/bin/python monitor.py
+Restart=always
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

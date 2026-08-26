@@ -1,0 +1,25 @@
+# Service systemd untuk dashboard web lokal.
+#
+# Pasang:
+#   sudo cp safety-dashboard.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now safety-dashboard
+#
+# Setelah jalan, buka dari HP/laptop di jaringan yang sama:
+#   http://<ip-mini-pc>:8080
+
+[Unit]
+Description=Safety Monitor - dashboard web lokal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=safety
+WorkingDirectory=/opt/safety-monitor
+ExecStart=/opt/safety-monitor/venv/bin/python dashboard.py
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
