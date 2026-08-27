@@ -5,6 +5,7 @@ jaringan lokal, mengambil gambar berkala, menganalisis, dan menyimpan
 semua hasilnya di mesin itu sendiri.
 
 - Deteksi APD (helm & rompi) dan orang masuk zona terlarang
+- Deteksi material yang menghalangi jalur evakuasi / pintu darurat
 - Capture berkala dari beberapa kamera sekaligus lewat RTSP
 - Semua data disimpan lokal: SQLite + snapshot JPEG
 - Dashboard web yang bisa dibuka dari HP/laptop di jaringan yang sama
@@ -112,7 +113,65 @@ itu tetap mengecek APD.
 
 ---
 
-## 5. Menjalankan sebagai service
+## 5. Mengatur jalur akses (deteksi material menghalangi)
+
+Fitur ini memantau jalur evakuasi dan pintu darurat agar tidak tertimbun
+material. Cara kerjanya membandingkan kondisi sekarang dengan foto jalur
+saat bersih — jadi bisa menangkap material apa pun tanpa perlu melatih
+model, karena yang dinilai adalah "jalur ini tertutup", bukan "yang
+menutupi itu pasir atau besi".
+
+**Langkah 1 — tentukan polygon jalur.** Sama seperti zona terlarang, pakai
+`setup_zone.py`, lalu salin hasilnya ke bagian `access_paths` di `config.py`:
+
+```python
+"access_paths": [
+    {"name": "Jalur Evakuasi Utama", "polygon": [(350, 250), (620, 250), (620, 470), (350, 470)]},
+],
+```
+
+**Langkah 2 — ambil baseline saat jalur benar-benar bersih.** Ini langkah
+paling menentukan hasilnya:
+
+```bash
+./venv/bin/python setup_path.py --baseline
+```
+
+Pastikan tidak ada material, kendaraan, atau tumpukan apa pun di jalur saat
+foto ini diambil. Baseline yang kotor akan membuat sistem menganggap material
+tersebut sebagai bagian normal dari jalur.
+
+**Langkah 3 — uji hasilnya:**
+
+```bash
+./venv/bin/python setup_path.py --check
+```
+
+Jalur bersih seharusnya terbaca di bawah 5%. Kalau terbaca tinggi padahal
+jalur kosong, ambil ulang baseline atau naikkan `OBSTRUCTION_MIN_AREA_RATIO`.
+
+**Ambil ulang baseline** setiap kali kondisi jalur berubah permanen: pagar
+dipindah, jalur dicor, penerangan diganti, atau kamera bergeser.
+
+### Bagaimana laporan palsu ditekan
+
+Tiga penyaring bekerja berlapis:
+
+| Penyaring | Menangani |
+|---|---|
+| Perbandingan warna + tekstur | Bayangan sore dan awan lewat — area menggelap tapi tekstur permukaan tetap utuh, jadi diabaikan |
+| Area orang dikecualikan | Pekerja yang berdiri atau lewat di jalur tidak dihitung sebagai halangan |
+| Ukuran gumpalan minimum | Serpihan kecil, daun, dan noise kamera diabaikan |
+| Harus bertahan beberapa siklus | Truk yang berhenti sebentar tidak dilaporkan; material yang ditinggal dilaporkan |
+
+Dengan setelan bawaan (interval 3 menit, konfirmasi 3 siklus), halangan baru
+dilaporkan setelah bertahan sekitar 9 menit. Naikkan
+`OBSTRUCTION_CONFIRM_CHECKS` kalau masih terlalu sering lapor, turunkan kalau
+respons perlu lebih cepat.
+
+---
+
+## 6. Menjalankan sebagai service
 
 Supaya jalan otomatis dan nyala lagi setelah mati listrik:
 
@@ -138,7 +197,7 @@ journalctl -u safety-monitor -f
 
 ---
 
-## 6. Membuka dashboard
+## 7. Membuka dashboard
 
 Dari HP atau laptop yang terhubung ke jaringan/WiFi yang sama:
 
@@ -155,7 +214,7 @@ jaringan proyek — jangan port forwarding.
 
 ---
 
-## 7. Pengaturan yang sering disesuaikan
+## 8. Pengaturan yang sering disesuaikan
 
 Semua di `config.py`:
 
@@ -167,6 +226,10 @@ Semua di `config.py`:
 | `SAVE_ONLY_VIOLATIONS` | `True` = simpan foto hanya saat ada pelanggaran (hemat disk) |
 | `RETENTION_DAYS` | Umur maksimal data sebelum dihapus otomatis |
 | `HELMET_MIN_RATIO` / `VEST_MIN_RATIO` | Sensitivitas deteksi APD |
+| `OBSTRUCTION_MIN_AREA_RATIO` | Berapa persen jalur tertutup baru dianggap terhalang |
+| `OBSTRUCTION_CONFIRM_CHECKS` | Berapa siklus berturut-turut sebelum halangan dilaporkan |
+| `OBSTRUCTION_COLOR_THRESHOLD` | Sensitivitas perbedaan warna material vs permukaan jalur |
+| `OBSTRUCTION_TEXTURE_THRESHOLD` | Naikkan kalau bayangan masih sering terlapor |
 
 **Perkiraan pemakaian disk:** dengan 2 kamera, interval 3 menit, jam kerja
 12 jam, dan hanya menyimpan pelanggaran, pemakaian umumnya di bawah 1 GB per
@@ -175,18 +238,20 @@ per bulan.
 
 ---
 
-## 8. Struktur project
+## 9. Struktur project
 
 ```
 safety-monitor/
 ├── monitor.py            # service utama (loop capture berkala)
 ├── dashboard.py           # web dashboard lokal
 ├── setup_zone.py          # tool atur zona terlarang
+├── setup_path.py          # tool atur baseline jalur akses
 ├── capture.py             # ambil frame dari RTSP
 ├── analyzer.py            # gabung deteksi orang + APD + zona
 ├── detector.py            # deteksi orang (YOLOv8)
 ├── ppe_detector.py        # deteksi helm & rompi (warna HSV)
 ├── zone.py                # logika zona terlarang
+├── obstruction.py         # deteksi jalur terhalang material
 ├── storage.py             # SQLite + snapshot + retensi
 ├── config.py              # semua pengaturan
 ├── requirements.txt
@@ -195,12 +260,13 @@ safety-monitor/
 └── data/                  # dibuat otomatis
     ├── safety.db
     ├── snapshots/YYYY-MM-DD/
+    ├── baseline/          # foto jalur kondisi bersih
     └── reference/
 ```
 
 ---
 
-## 9. Batasan yang perlu diketahui
+## 10. Batasan yang perlu diketahui
 
 **Deteksi APD pakai analisis warna (HSV), bukan model khusus APD.** Ini
 ringan dan tidak butuh training, tapi akurasinya terbatas:
@@ -213,6 +279,22 @@ ringan dan tidak butuh training, tapi akurasinya terbatas:
 Karena itu, **sistem ini sebaiknya diposisikan sebagai alat bantu pengawasan,
 bukan dasar penindakan otomatis.** Selalu ada foto bukti di dashboard supaya
 petugas K3 bisa memverifikasi sendiri sebelum menindaklanjuti.
+
+**Deteksi jalur terhalang tidak mengenali jenis material.** Sistem hanya tahu
+"ada sesuatu yang menutupi jalur", bukan apa benda itu. Konsekuensinya:
+
+- Benda apa pun yang menetap di jalur akan dilaporkan, termasuk yang sebenarnya
+  wajar berada di sana (gerobak parkir, drum air). Kalau ada objek yang memang
+  permanen, ambil baseline ulang dengan objek itu sudah di tempatnya.
+- Kamera yang bergeser membuat seluruh baseline tidak valid dan berpotensi
+  memicu laporan terus-menerus. Pastikan braket kamera terpasang kokoh, dan
+  ambil baseline ulang setelah maintenance kamera.
+- Perubahan cuaca ekstrem (genangan air, lumpur menyeluruh) bisa terbaca
+  sebagai halangan.
+
+Kalau nanti butuh sistem yang bisa membedakan jenis material — misalnya untuk
+inventaris atau pelacakan stok — itu memang butuh model yang dilatih khusus,
+dan pendekatan baseline ini tidak bisa menggantikannya.
 
 **Untuk akurasi tingkat produksi**, ganti fungsi `check_ppe()` di
 `ppe_detector.py` dengan model YOLO yang dilatih khusus APD:
@@ -229,7 +311,7 @@ mengubah `monitor.py`, `storage.py`, atau `dashboard.py` sama sekali.
 
 ---
 
-## 10. Catatan privasi & kepatuhan
+## 11. Catatan privasi & kepatuhan
 
 Sistem ini merekam gambar pekerja. Sebelum dioperasikan:
 

@@ -30,8 +30,22 @@ CREATE TABLE IF NOT EXISTS detections (
     no_vest       INTEGER NOT NULL,
     in_zone       INTEGER NOT NULL,
     is_violation  INTEGER NOT NULL,
+    blocked_paths INTEGER NOT NULL DEFAULT 0,
+    block_detail  TEXT DEFAULT '',
     detail        TEXT,
     snapshot_path TEXT
+);
+
+-- Status jalur disimpan di DB (bukan di memori) supaya hitungan
+-- "terdeteksi berapa kali berturut-turut" tidak hilang saat service restart.
+CREATE TABLE IF NOT EXISTS path_state (
+    camera_id    TEXT NOT NULL,
+    path_name    TEXT NOT NULL,
+    consecutive  INTEGER NOT NULL DEFAULT 0,
+    last_ratio   REAL NOT NULL DEFAULT 0,
+    first_seen   TEXT,
+    updated_at   TEXT,
+    PRIMARY KEY (camera_id, path_name)
 );
 CREATE INDEX IF NOT EXISTS idx_detections_time ON detections(timestamp);
 CREATE INDEX IF NOT EXISTS idx_detections_cam  ON detections(camera_id);
@@ -44,6 +58,14 @@ def init_storage():
     os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.executescript(SCHEMA)
+
+    # Database dari versi sebelum fitur deteksi halangan belum punya kolom ini
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(detections)")}
+    if "blocked_paths" not in existing:
+        conn.execute("ALTER TABLE detections ADD COLUMN blocked_paths INTEGER NOT NULL DEFAULT 0")
+    if "block_detail" not in existing:
+        conn.execute("ALTER TABLE detections ADD COLUMN block_detail TEXT DEFAULT ''")
+
     conn.commit()
     conn.close()
 
@@ -73,8 +95,9 @@ def log_detection(camera_id, camera_name, result, snapshot_path, timestamp):
     conn.execute(
         """INSERT INTO detections
            (timestamp, camera_id, camera_name, person_count, no_helmet,
-            no_vest, in_zone, is_violation, detail, snapshot_path)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            no_vest, in_zone, is_violation, blocked_paths, block_detail,
+            detail, snapshot_path)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             timestamp.strftime("%Y-%m-%d %H:%M:%S"),
             camera_id,
@@ -84,6 +107,8 @@ def log_detection(camera_id, camera_name, result, snapshot_path, timestamp):
             result["no_vest"],
             result["in_zone"],
             1 if result["is_violation"] else 0,
+            result.get("blocked_paths", 0),
+            result.get("block_detail", ""),
             result["detail"],
             snapshot_path or "",
         ),
@@ -166,3 +191,50 @@ def disk_usage_mb():
             except OSError:
                 pass
     return round(total / (1024 * 1024), 1)
+
+
+def bump_path_state(camera_id, path_name, is_blocked, ratio):
+    """
+    Perbarui hitungan berapa kali berturut-turut satu jalur terdeteksi terhalang.
+
+    Return (consecutive, first_seen):
+        consecutive = jumlah pengecekan berturut-turut jalur ini terhalang.
+                      Kembali ke 0 begitu jalur terlihat bersih.
+    """
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn = _connect()
+    row = conn.execute(
+        "SELECT consecutive, first_seen FROM path_state WHERE camera_id = ? AND path_name = ?",
+        (camera_id, path_name),
+    ).fetchone()
+
+    if is_blocked:
+        consecutive = (row["consecutive"] if row else 0) + 1
+        first_seen = (row["first_seen"] if row and row["consecutive"] > 0 else None) or now
+    else:
+        consecutive = 0
+        first_seen = None
+
+    conn.execute(
+        """INSERT INTO path_state (camera_id, path_name, consecutive, last_ratio, first_seen, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(camera_id, path_name) DO UPDATE SET
+               consecutive = excluded.consecutive,
+               last_ratio  = excluded.last_ratio,
+               first_seen  = excluded.first_seen,
+               updated_at  = excluded.updated_at""",
+        (camera_id, path_name, consecutive, ratio, first_seen, now),
+    )
+    conn.commit()
+    conn.close()
+    return consecutive, first_seen
+
+
+def get_blocked_paths():
+    """Daftar jalur yang saat ini sedang terhalang, untuk ringkasan dashboard."""
+    conn = _connect()
+    rows = conn.execute(
+        "SELECT * FROM path_state WHERE consecutive > 0 ORDER BY consecutive DESC"
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]

@@ -16,7 +16,7 @@ import sys
 import time
 from datetime import datetime
 
-from analyzer import analyze, score, get_detector
+from analyzer import analyze_frames, get_detector
 from capture import grab_frames, test_camera
 from config import (
     CAMERAS, CAPTURE_INTERVAL_SECONDS, FRAMES_PER_CHECK, FRAME_GAP_SECONDS,
@@ -56,13 +56,11 @@ def check_camera(camera):
         print(f"[{timestamp:%H:%M:%S}] {camera['name']}: kamera tidak terjangkau")
         return
 
-    # Analisis semua frame, ambil yang paling banyak pelanggarannya
-    best_frame = None
-    best_result = None
-    for frame in frames:
-        annotated, result = analyze(frame, camera.get("zones", []))
-        if best_result is None or score(result) > score(best_result):
-            best_frame, best_result = annotated, result
+    # Semua frame dinilai, yang terburuk dipakai sebagai bukti.
+    # Status jalur diperbarui sekali saja untuk siklus ini.
+    best_frame, best_result = analyze_frames(frames, camera)
+    if best_result is None:
+        return
 
     snapshot_path = None
     if best_result["is_violation"] or not SAVE_ONLY_VIOLATIONS:
@@ -74,6 +72,11 @@ def check_camera(camera):
     print(f"[{timestamp:%H:%M:%S}] {camera['name']}: "
           f"{best_result['person_count']} orang - {status} - {best_result['detail']}")
 
+    if best_result.get("missing_baseline"):
+        jalur = ", ".join(best_result["missing_baseline"])
+        print(f"    [!] Jalur belum punya baseline: {jalur}")
+        print(f"        Jalankan: python setup_path.py --baseline")
+
 
 def run_cycle():
     for camera in CAMERAS:
@@ -84,6 +87,27 @@ def run_cycle():
         except Exception as e:
             # Satu kamera bermasalah tidak boleh menjatuhkan seluruh service
             print(f"[monitor] Error pada {camera['name']}: {e}")
+
+
+def warn_missing_baselines():
+    """
+    Jalur tanpa baseline tidak bisa diperiksa sama sekali, dan itu mudah
+    terlewat kalau tidak disebutkan sejak awal.
+    """
+    from obstruction import load_baseline
+
+    missing = []
+    for cam in CAMERAS:
+        for p in cam.get("access_paths", []):
+            if load_baseline(cam["id"], p["name"]) is None:
+                missing.append(f"{cam['name']} / {p['name']}")
+
+    if missing:
+        print("\n[monitor] PERINGATAN - jalur berikut belum punya baseline")
+        print("          dan TIDAK akan diperiksa:")
+        for m in missing:
+            print(f"            - {m}")
+        print("          Perbaiki dengan: python setup_path.py --baseline\n")
 
 
 def main():
@@ -101,9 +125,12 @@ def main():
         return
 
     init_storage()
+    warn_missing_baselines()
     print("[monitor] Memuat model deteksi...")
     get_detector()
-    print(f"[monitor] Siap. {len(CAMERAS)} kamera, cek tiap {CAPTURE_INTERVAL_SECONDS} detik.")
+    total_paths = sum(len(c.get("access_paths", [])) for c in CAMERAS)
+    print(f"[monitor] Siap. {len(CAMERAS)} kamera, {total_paths} jalur akses dipantau, "
+          f"cek tiap {CAPTURE_INTERVAL_SECONDS} detik.")
     print(f"[monitor] Jam aktif: {ACTIVE_HOURS_START:02d}:00 - {ACTIVE_HOURS_END:02d}:00")
 
     if args.once:

@@ -15,7 +15,8 @@ import os
 from flask import Flask, jsonify, render_template_string, request, send_from_directory
 
 from config import CAMERAS, SNAPSHOT_DIR, DASHBOARD_HOST, DASHBOARD_PORT
-from storage import init_storage, get_recent, get_daily_summary, disk_usage_mb
+from storage import (init_storage, get_recent, get_daily_summary,
+                     disk_usage_mb, get_blocked_paths)
 
 app = Flask(__name__)
 
@@ -60,6 +61,15 @@ TEMPLATE = """
     .badge.red { background: #fce8e8; color: #a61b1b; }
     .badge.green { background: #e6f4ea; color: #1e6b39; }
     .empty { text-align: center; color: #6b7480; padding: 36px 12px; }
+    .badge.orange { background: #fdf0e3; color: #94531a; }
+    .alert { background: #fff4e5; border: 1px solid #f0c48a;
+             border-left: 4px solid #e8871e; border-radius: 8px;
+             padding: 12px 13px; margin-bottom: 16px; }
+    .alert-title { font-weight: 600; font-size: 14px; margin-bottom: 7px;
+                   color: #94531a; }
+    .alert-row { display: flex; justify-content: space-between; gap: 10px;
+                 font-size: 13px; padding: 3px 0; flex-wrap: wrap; }
+    .dim { color: #6b7480; font-size: 12px; }
   </style>
 </head>
 <body>
@@ -68,6 +78,18 @@ TEMPLATE = """
     <p>{{ cameras|length }} kamera &middot; {{ disk }} MB terpakai</p>
   </header>
   <div class="wrap">
+    {% if blocked %}
+    <div class="alert">
+      <div class="alert-title">Jalur terhalang saat ini</div>
+      {% for b in blocked %}
+        <div class="alert-row">
+          <span>{{ b.path_name }} <span class="dim">({{ b.camera_id }})</span></span>
+          <span class="dim">{{ (b.last_ratio * 100)|round|int }}% &middot; sejak {{ b.first_seen or '-' }}</span>
+        </div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
     <div class="stats">
       <div class="stat">
         <div class="val">{{ total_hari_ini }}</div>
@@ -80,6 +102,10 @@ TEMPLATE = """
       <div class="stat">
         <div class="val">{{ pelanggaran_minggu }}</div>
         <div class="lbl">Pelanggaran 7 hari</div>
+      </div>
+      <div class="stat">
+        <div class="val">{{ blocked|length }}</div>
+        <div class="lbl">Jalur terhalang</div>
       </div>
     </div>
 
@@ -110,9 +136,11 @@ TEMPLATE = """
             {% if r.no_helmet %}<span class="badge red">{{ r.no_helmet }} tanpa helm</span>{% endif %}
             {% if r.no_vest %}<span class="badge red">{{ r.no_vest }} tanpa rompi</span>{% endif %}
             {% if r.in_zone %}<span class="badge red">{{ r.in_zone }} di zona terlarang</span>{% endif %}
+            {% if r.blocked_paths %}<span class="badge orange">{{ r.blocked_paths }} jalur terhalang</span>{% endif %}
             {% if not r.is_violation %}<span class="badge green">Aman</span>{% endif %}
           </div>
           <div class="detail">{{ r.person_count }} orang terdeteksi</div>
+          {% if r.block_detail %}<div class="detail">{{ r.block_detail }}</div>{% endif %}
         </div>
       </div>
     {% endfor %}
@@ -140,6 +168,7 @@ def index():
         cameras=CAMERAS,
         f=f,
         cam=cam,
+        blocked=get_blocked_paths(),
         disk=disk_usage_mb(),
         total_hari_ini=hari_ini["total_cek"] if hari_ini else 0,
         pelanggaran_hari_ini=(hari_ini["total_pelanggaran"] or 0) if hari_ini else 0,
